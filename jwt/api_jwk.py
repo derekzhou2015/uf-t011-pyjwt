@@ -28,13 +28,16 @@ class PyJWK:
         :raises MissingCryptographyError: If the algorithm requires ``cryptography`` to be installed and it is not available.
         :raises PyJWKError: If unable to find an algorithm for the key.
         """
+        if not isinstance(jwk_data, dict):
+            raise InvalidKeyError("JWK data must be a JSON object")
+
         self._jwk_data = jwk_data
 
         kty = self._jwk_data.get("kty", None)
         if not kty:
             raise InvalidKeyError(f"kty is not found: {self._jwk_data}")
 
-        if not algorithm and isinstance(self._jwk_data, dict):
+        if not algorithm:
             algorithm = self._jwk_data.get("alg", None)
 
         if not algorithm:
@@ -81,7 +84,7 @@ class PyJWK:
 
         try:
             self.key = self.Algorithm.from_jwk(self._jwk_data)
-        except (TypeError, ValueError) as error:
+        except (TypeError, ValueError, KeyError, RecursionError) as error:
             raise InvalidKeyError(
                 f"Unable to construct key from JWK: {error}"
             ) from error
@@ -109,7 +112,10 @@ class PyJWK:
 
         :rtype: PyJWK
         """
-        obj = json.loads(data)
+        try:
+            obj = json.loads(data)
+        except (ValueError, RecursionError):
+            raise InvalidKeyError("Key is not valid JSON") from None
         return PyJWK.from_dict(obj, algorithm)
 
     @property
@@ -141,11 +147,11 @@ class PyJWKSet:
     def __init__(self, keys: list[JWKDict]) -> None:
         self.keys: list[PyJWK] = []
 
-        if not keys:
-            raise PyJWKSetError("The JWK Set did not contain any keys")
-
         if not isinstance(keys, list):
             raise PyJWKSetError("Invalid JWK Set value")
+
+        if not keys:
+            raise PyJWKSetError("The JWK Set did not contain any keys")
 
         for key in keys:
             if not isinstance(key, dict):
@@ -171,7 +177,10 @@ class PyJWKSet:
 
     @staticmethod
     def from_json(data: str) -> PyJWKSet:
-        obj = json.loads(data)
+        try:
+            obj = json.loads(data)
+        except (ValueError, RecursionError):
+            raise PyJWKSetError("The JWK Set is not valid JSON") from None
         return PyJWKSet.from_dict(obj)
 
     def __getitem__(self, kid: str) -> PyJWK:

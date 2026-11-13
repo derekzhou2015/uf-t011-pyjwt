@@ -468,13 +468,20 @@ class HMACAlgorithm(Algorithm):
                 obj = jwk
             else:
                 raise ValueError
-        except ValueError:
+        except (ValueError, RecursionError):
             raise InvalidKeyError("Key is not valid JSON") from None
 
         if obj.get("kty") != "oct":
             raise InvalidKeyError("Not an HMAC key")
 
-        key_bytes = base64url_decode(obj["k"])
+        k = obj.get("k")
+        if not isinstance(k, (str, bytes)):
+            raise InvalidKeyError("HMAC key is missing a valid 'k' parameter")
+
+        try:
+            key_bytes = base64url_decode(k)
+        except (TypeError, ValueError) as error:
+            raise InvalidKeyError(f"Unable to decode HMAC key: {error}") from error
         if len(key_bytes) == 0:
             raise InvalidKeyError("HMAC key must not be empty.")
         return key_bytes
@@ -616,7 +623,7 @@ if has_crypto:
                     obj = jwk
                 else:
                     raise ValueError
-            except ValueError:
+            except (ValueError, RecursionError):
                 raise InvalidKeyError("Key is not valid JSON") from None
 
             if obj.get("kty") != "RSA":
@@ -840,7 +847,7 @@ if has_crypto:
                     obj = jwk
                 else:
                     raise ValueError
-            except ValueError:
+            except (ValueError, RecursionError):
                 raise InvalidKeyError("Key is not valid JSON") from None
 
             if obj.get("kty") != "EC":
@@ -1084,7 +1091,7 @@ if has_crypto:
                     obj = jwk
                 else:
                     raise ValueError
-            except ValueError:
+            except (ValueError, RecursionError):
                 raise InvalidKeyError("Key is not valid JSON") from None
 
             if obj.get("kty") != "OKP":

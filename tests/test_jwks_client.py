@@ -59,6 +59,11 @@ RESPONSE_DATA_NO_MATCHING_KID = {
     ]
 }
 
+# Nested beyond the json scanner depth so json.load raises RecursionError
+# rather than returning a value. Built by string concatenation (not nested
+# Python objects) to avoid Python recursion during construction.
+DEEPLY_NESTED_BODY = '{"keys": [{"x": ' * 2000 + '{"kty": "RSA"}' + "}]" + "}" * 2000
+
 
 @contextlib.contextmanager
 def mocked_success_response(data: object) -> Iterator[mock.Mock]:
@@ -70,6 +75,24 @@ def mocked_success_response(data: object) -> Iterator[mock.Mock]:
         response.__enter__ = mock.Mock(return_value=response)
         response.__exit__ = mock.Mock()
         response.read.side_effect = [json.dumps(data)]
+        urlopen_mock.return_value = response
+        yield urlopen_mock
+
+
+@contextlib.contextmanager
+def mocked_raw_response(raw_body: str) -> Iterator[mock.Mock]:
+    # Unlike mocked_success_response, the body is returned verbatim so tests
+    # can serve payloads that are not valid JSON.
+    with mock.patch("urllib.request.build_opener") as build_opener_mock:
+        opener = mock.Mock()
+        build_opener_mock.return_value = opener
+        urlopen_mock = opener.open
+        response = mock.Mock()
+        response.__enter__ = mock.Mock(return_value=response)
+        response.__exit__ = mock.Mock(return_value=False)
+        # json.load() probes the encoding with a first read() call, so the
+        # body must be returned on every read rather than only once.
+        response.read.return_value = raw_body
         urlopen_mock.return_value = response
         yield urlopen_mock
 
@@ -473,6 +496,54 @@ class TestPyJWKClient:
         jwks_client = PyJWKClient(url)
         with mocked_success_response([{"kty": "RSA"}]):
             with pytest.raises(PyJWKClientError, match="did not return a JSON object"):
+                jwks_client.get_jwk_set()
+
+    @pytest.mark.parametrize(
+        "raw_body",
+        [
+            "{not valid json",
+            '{"keys": [',  # truncated mid-document
+            DEEPLY_NESTED_BODY,  # beyond the json scanner nesting limit
+        ],
+    )
+    def test_fetch_data_normalizes_unparseable_json(self, raw_body: str) -> None:
+        # The endpoint was reached but returned something json cannot parse.
+        # Syntax errors, truncation and excessive nesting must surface as a
+        # library error, never a raw json.JSONDecodeError or RecursionError.
+        url = "https://dev-87evx9ru.auth0.com/.well-known/jwks.json"
+        jwks_client = PyJWKClient(url)
+
+        with mocked_raw_response(raw_body):
+            with pytest.raises(PyJWKClientError, match="did not return valid JSON"):
+                jwks_client.fetch_data()
+
+    def test_malformed_member_does_not_break_fetch_of_remaining_keys(self) -> None:
+        # End-to-end through the network entry: a member missing key material
+        # is skipped and the fully valid member is still served.
+        url = "https://dev-87evx9ru.auth0.com/.well-known/jwks.json"
+        payload = {
+            "keys": [
+                {"kty": "oct", "kid": "unusable"},
+                RESPONSE_DATA_WITH_MATCHING_KID["keys"][0],
+            ]
+        }
+
+        jwks_client = PyJWKClient(url)
+        with mocked_success_response(payload):
+            jwk_set = jwks_client.get_jwk_set()
+
+        assert len(jwk_set.keys) == 1
+        assert jwk_set.keys[0].key_id == (
+            "NEE1QURBOTM4MzI5RkFDNTYxOTU1MDg2ODgwQ0UzMTk1QjYyRkRFQw"
+        )
+
+    def test_fetch_raises_set_error_when_every_member_is_unusable(self) -> None:
+        url = "https://dev-87evx9ru.auth0.com/.well-known/jwks.json"
+        payload = {"keys": [{"kty": "oct", "kid": "unusable"}, None, 7]}
+
+        jwks_client = PyJWKClient(url)
+        with mocked_success_response(payload):
+            with pytest.raises(PyJWKSetError):
                 jwks_client.get_jwk_set()
 
     def test_get_jwt_set_cache_expired_result(self) -> None:

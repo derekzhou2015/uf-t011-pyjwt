@@ -165,7 +165,16 @@ class PyJWKClient:
                 handlers.append(urllib.request.HTTPSHandler(context=self.ssl_context))
             opener = urllib.request.build_opener(*handlers)
             with opener.open(r, timeout=self.timeout) as response:
-                jwk_set = json.load(response)
+                try:
+                    jwk_set = json.load(response)
+                except (json.JSONDecodeError, RecursionError) as e:
+                    # The endpoint was reached, but its body is not parseable
+                    # JSON. Treat this as a bad payload (PyJWKClientError),
+                    # not as a connection failure, and never let the stdlib
+                    # exception reach callers.
+                    raise PyJWKClientError(
+                        f"The JWKS endpoint did not return valid JSON: {e}"
+                    ) from e
         except (URLError, TimeoutError, http.client.HTTPException) as e:
             if isinstance(e, HTTPError):
                 e.close()

@@ -16,6 +16,12 @@ from .utils import crypto_required, key_path, no_crypto_required
 if has_crypto:
     from jwt.algorithms import ECAlgorithm, HMACAlgorithm, OKPAlgorithm, RSAAlgorithm
 
+# CPython's json scanner aborts with RecursionError once nesting crosses its
+# own depth (objects need more levels than arrays). The payload is built by
+# string concatenation rather than from nested Python objects, so no Python
+# recursion is involved in constructing it — only the scanner's limit is hit.
+DEEPLY_NESTED_JSON = '{"x": ' * 5000 + '{"kty": "RSA"}' + "}" * 5000
+
 
 class TestPyJWK:
     @crypto_required
@@ -211,6 +217,42 @@ class TestPyJWK:
         with pytest.raises(InvalidKeyError):
             PyJWK.from_dict(v)
 
+    @crypto_required
+    @pytest.mark.parametrize("not_an_object", [7, None, ["kty", "RSA"], "RSA"])
+    def test_from_dict_rejects_members_that_are_not_json_objects(
+        self, not_an_object: object
+    ) -> None:
+        # A non-dict JWK member must be an InvalidKeyError, never an uncaught
+        # AttributeError from .get() on the wrong type.
+        with pytest.raises(InvalidKeyError, match="must be a JSON object"):
+            PyJWK(not_an_object)  # type: ignore[arg-type]
+
+    @crypto_required
+    def test_oct_key_missing_material_raises_invalid_key_error(self) -> None:
+        # `k` absent: the stdlib KeyError must not escape the key entry.
+        with pytest.raises(InvalidKeyError, match="'k' parameter"):
+            PyJWK({"kty": "oct", "kid": "hmac"})
+
+        # `k` present but the wrong JSON type likewise normalizes.
+        with pytest.raises(InvalidKeyError, match="'k' parameter"):
+            PyJWK({"kty": "oct", "k": 123})
+
+    @crypto_required
+    @pytest.mark.parametrize(
+        "raw",
+        [
+            "{not valid json",
+            '{"kty": "RSA",',  # truncated
+            DEEPLY_NESTED_JSON,  # beyond the json scanner nesting limit
+        ],
+    )
+    def test_from_json_normalizes_bad_payloads(self, raw: str) -> None:
+        # Syntax errors, truncation and excessive nesting must all surface as
+        # a library InvalidKeyError rather than json.JSONDecodeError or
+        # RecursionError.
+        with pytest.raises(InvalidKeyError):
+            PyJWK.from_json(raw)
+
     @no_crypto_required
     def test_missing_crypto_library_good_error_message(self) -> None:
         with pytest.raises(PyJWKError) as exc:
@@ -354,6 +396,50 @@ class TestPyJWKSet:
     def test_jwk_with_invalid_component_type_raises_invalid_key_error(self) -> None:
         with pytest.raises(InvalidKeyError):
             PyJWK({"kty": "RSA", "alg": "RS256", "n": 1, "e": "AQAB"})
+
+    @crypto_required
+    def test_valid_member_is_not_penalized_when_another_lacks_material(self) -> None:
+        # A member missing key material is skipped; a fully valid member in
+        # the same set must remain usable regardless of ordering.
+        with open(key_path("jwk_rsa_pub.json")) as keyfile:
+            valid_key = json.loads(keyfile.read())
+        valid_key["kid"] = "usable"
+        member_missing_material = {"kty": "oct", "kid": "unusable"}
+
+        for keys in (
+            [member_missing_material, valid_key],
+            [valid_key, member_missing_material],
+        ):
+            keyset = PyJWKSet.from_dict({"keys": keys})
+            assert [key.key_id for key in keyset.keys] == ["usable"]
+
+    @crypto_required
+    @pytest.mark.parametrize(
+        "members",
+        [
+            [{"kty": "oct"}],  # missing key material
+            [{"kty": "oct"}, None, 7, "nope"],  # missing material + non-objects
+            [None, 7],  # only non-object members
+        ],
+    )
+    def test_set_of_only_unusable_members_raises_set_error(
+        self, members: list[object]
+    ) -> None:
+        with pytest.raises(PyJWKSetError):
+            PyJWKSet.from_dict({"keys": members})
+
+    @crypto_required
+    @pytest.mark.parametrize(
+        "raw",
+        [
+            '{"keys": [}',  # invalid syntax
+            '{"keys": [',  # truncated
+            '{"keys": ' + DEEPLY_NESTED_JSON + "}",  # excessive nesting
+        ],
+    )
+    def test_from_json_normalizes_bad_payloads(self, raw: str) -> None:
+        with pytest.raises(PyJWKSetError):
+            PyJWKSet.from_json(raw)
 
     @crypto_required
     def test_keyset_with_unknown_alg(self) -> None:
